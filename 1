@@ -1,0 +1,94 @@
+
+// автомат для отца и клона 
+// проверка угловой величины (в лоб и сбооку)
+var Robot = function(robot) {
+};
+ 
+var msg="";
+var tick =0;
+var start_x, start_y, start_t;
+var state = ["p0", "s0"];  
+
+var robot_collision_flg = [0,0];
+var scan_flg = [0,0];
+var scan_info = [];
+var my_x = [0,0], my_y = [0,0];
+var ta_1= -1000, ta_2= -1000;
+
+var old_state = ["",""];
+
+function d(w){  
+  if( state[w] == old_state[w] ) {return;}  
+  //msg += "dbg: t="+tick+"\twho="+w+"\tstate[0]="+state[0]+"\tstate[1]="+state[1]+"\n";
+  msg += "t="+tick+"\tw="+w+"\t"+old_state[w]+" ---> "+state[w]+"\n";
+  old_state[w] = state[w];  
+}
+function idle_parent( r,w ){
+  switch( state[w] ){
+    case "p0":if( r.angle === 0 ) {state[w] = "p1";} else {r.turn(1);}  break;   
+    case "p1":  if( r.position.y != 50 ) {r.ahead(1);} else {state[w] = "p2";}  break;
+    case "p2":  if( r.angle == 90 ) {state[w] = "p3";}  else {r.turn(1);} break;   
+    case "p3":if( r.position.x != 250 ) {r.ahead(1);} else {state[w] = "p_finish";}  break;
+    case "p_finish": break;           
+	default: msg += "************* error *********** parent: uknown state["+w+"] = "+state[w]+"\n"; break;
+  }
+}
+function idle_clone( r,w ){
+   switch( state[w] ){
+    case "s0": if( r.angle == 90 ) {state[w] = "s1";} else {r.turn(1);} break; 
+    case "s1": if(r.position.x==100) {state[w] = "s2";} else {r.ahead(1);}  break;
+    case "s2": if( r.angle === 0 ) {state[w] = "s3";}  else {r.turn(-1);}  break; 
+    case "s3": if( r.position.y != 50 ) {r.ahead(1);} else {state[w] = "s4"; scan_flg[w]=0;} break;  
+    case "s4": if( scan_flg[ w ] != 1 )  {r.turn(1);}	
+      else{ // кас по часов
+        ta_1 = r.angle; msg += "\tta_1="+ta_1+"\n";
+        scan_flg[w]=0;
+        state[w] = "s5";   
+      } 
+      break;              
+    case "s5":		
+      if( scan_flg[ w ] != 1 )  {r.turn(-1);}
+      else{ // кас против час
+        ta_2 = r.angle;  msg += "\tta_2="+ta_2+"\n";
+        var da = (ta_2 - ta_1)/2;
+        var dx = r.position.x - my_x[1-w];
+        var dy = r.position.y - my_y[1-w];           
+        var l = Math.sqrt( dx*dx + dy*dy );
+        var r1 = Math.tan( da/180*3.1415 ) * l;        
+        var r2 = Math.tan( da/180*3.1415 ) * (l-12);  
+        msg += "result:: da="+da+"\tr1="+r1+"\tr2="+r2+"\tdx="+dx+"\tdy="+dy+"\n";        
+        scan_flg[w]=0;
+        state[w] = "s_finish";                      
+      } 
+      break;              
+      
+    case "s_finish":
+      break;
+	  
+	default: msg += "************* error *********** clone: uknown state["+w+"] = "+state[w]+"\n"; break;
+  }
+} 
+Robot.prototype.onIdle = function(ev) {     
+  var r = ev.robot;
+  var who = r.parentId ? 1 : 0;      
+  //if( who === 0) {++tick;}   
+  tick++; 
+  if( (tick % 100)===0 && msg !== "" ) {r.log(msg); msg=""; }
+  if( tick==1) { r.clone(); msg += "t="+tick+"=============== start ====================\n"; }
+  my_x[who]=r.position.x; my_y[who]=r.position.y;
+  d(who); 
+  if( who===0 ) {idle_parent( r,who );}  else {idle_clone( r,who );}
+  }; 
+Robot.prototype.onWallCollision = function(ev) {              
+    var r = ev.robot;         
+}; 
+Robot.prototype.onRobotCollision = function(ev) {    
+    var r = ev.robot;
+};
+Robot.prototype.onScannedRobot = function(ev) {                        
+    var r = ev.robot;      
+  	var sr = ev.scannedRobot;
+	if( sr.id != r.parentId ) {return;}        
+  	var w = r.parentId ? 1 : 0; 
+	scan_flg[ w ] = 1; 
+};  
