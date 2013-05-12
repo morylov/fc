@@ -1,0 +1,340 @@
+
+// bot 5-1: блок информации о цели, обновление по self-scan 
+// -------- заголовки -------------
+
+var dbg_allow_flg = 1; // 0 - when we don't need debug output
+var dbg_pos_flg = 0;  // 1: output from dbg_pos is allowed
+var dbg_state_flg = 0;   // 1: output from dbg_state is allowed
+var dbg_collis_flg = 0; // 1: debug collisions (friend, wall)
+var dbg_goto_flg = 0;  // 1: debug go_to; 2: more info
+var dbg_diver_flg = 0;	// 1: debug shot_diver calculation, 2: add shot track
+
+var MAX_TICK = 100;
+
+var state = ["p0","s0"];	// автоматы должны начинаться с p0/s0
+var cur_pos = []; 		// arr[who] of struct (x,y,ba,ca)   
+var last_scan = {};		// инфо о последнем скане цели
+var new_scan_flg = [0,0];	// 1 - был новый скан, он еще не обработан в idle
+
+var tick = 0; 
+var msg = "";
+var diver_msg_track = "";
+
+var PARNT = 0;			// index in arr, const (used for readability)
+var CLONE = 1;			// index in arr, const (used for readability) 
+var OK = 1;			// const (used for readability) 
+var ARENA_HEIGHT = 480;	// лучше иницировать в начале работы, т.к. может поменяться !!!
+var ARENA_WIDTH = 395;
+
+var dbg_pos_msg = "";	// for dbg_pos
+var old_state = ["",""];	// for dbg_state
+
+var FRIEND_DIST_MIN = 30;	// distance where "friend_too_close" set
+var FRIEND_DIST_MAX = 50;	// distance where "friend_too_close" cleared
+var ftc_flg = [0,0];		// friend_too_close flag;   
+
+var MIN_SHOT_DIVER = 2; // мин отклонение снаряда от цели при котором стреляем
+var BULLET_SPEED = 2.2;		// скорость снаряда
+
+// -------------------------------- start util functions -----------------------------------------------
+
+function angle_to_point( cur, point ){ // angle 0-360
+  var ret_a = 0.0;
+  var dx = point.x - cur.x; 
+  var dy = point.y - cur.y;       
+  if( Math.abs(dy) < 0.0001 ) dy = dy<0 ? -0.0001 : 0.0001; // to avoid div by 0
+  var a = rad_to_deg( Math.atan ( Math.abs(dx/dy) ) ) ;
+  if( dy < 0 ) {  if (dx < 0) ret_a = 360-a;  else ret_a = a;  }
+  if( dy > 0 ) {  if (dx < 0) ret_a = 180+a;  else ret_a = 180-a;     }
+  return ret_a; 
+}  
+
+function norm_180( ang ){ //cnv +-360 to +-180
+  var ret_a;
+  if( ang >= -180 && ang <= 180 ) ret_a = ang;
+  if( ang > 180 ) ret_a = ang - 360;
+  if( ang < -180 ) ret_a = ang + 360;
+  return ret_a;
+}
+
+function norm_360( ang ){ return (ang>=360 ? ang-360 : ang+360); }  // cnv to 0-360
+function cnv_270_360( ang_270 ){ return norm_360 (ang_270+270); } // conv ang from 270 to normal 0-360 ang
+function dist( beg,end ){ return Math.sqrt( (end.x-beg.x)*(end.x-beg.x) + (end.y-beg.y)*(end.y-beg.y) ); } // distance beg-end
+function deg_to_rad( ang ){ return ( ang/180 * 3.1415926 );  }  // conv degree to radian
+function rad_to_deg( ang ){ return ( ang/3.1415926 * 180 );  }  // conv degree to radian
+
+function future_pos (cur_pos,ang,t,new_pos){ // ret pos1 - точку в которой будет через t двигаясь по направл. ang(0-360) из pos0
+	var dx = t * Math.sin( deg_to_rad(ang) );
+	var dy = t * Math.cos( deg_to_rad(ang) );
+	new_pos.x = cur_pos.x + dx;
+	new_pos.y = cur_pos.y - dy;	
+	return ( new_pos.y <0 || new_pos.y >ARENA_HEIGHT || new_pos.x <0 || new_pos.x >ARENA_WIDTH ) ? !OK : OK;
+	
+}
+
+function move_away( cur, goal ){ // ret 1: ahead отдалит от goal, иначе -1
+	var new_ahead = {};
+	var new_back = {};
+	future_pos( cur, cur.ba, 5, new_ahead);
+	var ang_back = norm_360 (180+cur.ba);
+	future_pos( cur, ang_back, 5, new_back );
+	var dist_ahead = dist( goal, new_ahead ); 	// расст до цели если ехать вперед
+	var dist_back  = dist( goal, new_back );	// расст до цели если ехать назад
+	if( dist_ahead >= dist_back ) return 1;		// для увелич.расстояние - вперед
+	else return -1;					// для увелич.расстояние - назад
+}
+
+// ----------------------- end util functions --------------------------------------
+
+var Robot = function(robot) {};
+
+function dbg_pos(){  // return debug message string whith positions of both bots
+	if( ! dbg_pos_flg ) return "";
+	dbg_pos_msg  = "dbg_pos: t="+tick+" w="+who;  
+	dbg_pos_msg += " pos[0](x,y,ba,caa):"+(cur_pos[0].x).toFixed(1)+","+(cur_pos[0].y).toFixed(1); 
+	dbg_pos_msg += ","+(cur_pos[0].ba).toFixed(2)+","+(cur_pos[0].caa).toFixed(2);
+	dbg_pos_msg += "\tpos[1](x,y,ba,caa):"+(cur_pos[1].x).toFixed(1)+","+(cur_pos[1].y).toFixed(1); 
+	dbg_pos_msg += ","+(cur_pos[1].ba).toFixed(2)+","+(cur_pos[1].caa).toFixed(2)+"\n";
+}
+
+function dbg_state(r){
+	if( dbg_state_flg ==0 ) return;
+	if( state[0]==old_state[0] && state[1]==old_state[1] ) return; // no output if nothing is changed
+	var who = r.parentId ? 1 : 0;  
+	msg += "dbg_state: t="+tick+" w="+who;
+	msg += "\tparent: ("+old_state[0]+")-->("+state[0]+") ";
+	msg += "\tclone: (" +old_state[1]+")-->("+state[1]+") \n";
+	old_state[0]=state[0]; old_state[1]=state[1];
+}
+
+function check_friend_dist(r){
+	var who = r.parentId ? CLONE : PARNT;  
+	var friend_dist = dist( cur_pos[who], cur_pos[1-who] );
+	if(  friend_dist < FRIEND_DIST_MIN ) {	// set flg
+		if( dbg_collis_flg && ftc_flg[who]==0 ) msg += "t="+tick+"\tftc set for "+who+" dist="+friend_dist.toFixed(1)+"\n";
+		ftc_flg[who] = 1; 
+	} 
+	if( friend_dist > FRIEND_DIST_MAX ) {	// clr flg
+		if( dbg_collis_flg && ftc_flg[who]==1 ) msg += "t="+tick+"\tftc clr for "+who+" dist="+friend_dist.toFixed(1)+"\n";
+		ftc_flg[who] = 0; 
+	} 
+	if( ftc_flg[who] == 0 ) return OK;
+	// ftc_flg is set     
+	if( tick % 2 ==0 ) r.turn(1); 
+	else r.move( 1, move_away( cur_pos[who], cur_pos[1-who]) ); 
+	return !OK;
+}
+ 
+ function check_direction( ang, dx, dy ){
+	if(   0<=ang && ang <90  ) return (dx>=0 && dy<=0) ? OK : !OK;
+	if(  90<=ang && ang <180 ) return (dx>=0 && dy>=0) ? OK : !OK;
+	if( 180<=ang && ang <270 ) return (dx<=0 && dy>=0) ? OK : !OK;
+	if( 270<=ang && ang <360 ) return (dx<=0 && dy<=0) ? OK : !OK;
+ }
+ 
+ function find_crosspoint( me, targ, cp ){
+	var tg_me = Math.tan( deg_to_rad(norm_180(me.ba)) );
+	var tg_targ = Math.tan( deg_to_rad(norm_180(targ.ba)) );
+	cp.y = ((me.x-targ.x) + (tg_me*me.y - tg_targ*targ.y)) / (tg_me-tg_targ);
+	cp.x = me.x + tg_me*(me.y-cp.y);
+	var bound_check = ( cp.y >=0 && cp.y <=ARENA_HEIGHT && cp.x >=0 && cp.x <=ARENA_WIDTH ) ? OK : !OK;
+	var dir_check = check_direction( me.ba, cp.x-me.x, cp.y-me.y );
+	return (bound_check==OK && dir_check==OK) ? OK : !OK;
+ }
+ 
+ function shot_diver(me, target){
+	var cp = {"x":-1, "y":-1};	// cross-point точка пересечения снаряда и линии движения цели
+	var rez;
+	if( dbg_diver_flg ) {
+		msg += "diver: t="+tick+"\tme(x,y,ba)="+(me.x).toFixed(3)+","+(me.y).toFixed(3)+","+(me.ba).toFixed(3);
+		msg += "\ttarget(x,y,ba)="+(target.x).toFixed(3)+","+(target.y).toFixed(3)+","+(target.ba).toFixed(3)+"\n";
+		}
+	rez=find_crosspoint(me, target, cp); 
+	if( dbg_diver_flg ) msg += "\tcrosspoint="+(cp.x).toFixed(3)+","+(cp.y).toFixed(3)+" rez="+rez;
+	if( rez != OK )return 99999;
+	
+	var dt_cp = dist(me,cp) / BULLET_SPEED;					// время лета снаряда до точки пересечения
+	if( dbg_diver_flg ) msg += "\tdt_cp = "+dt_cp;
+
+	var target_new_pos = {"x": -1, "y": -1 };	// положение цели через dt_cp
+	rez = future_pos ( target, target.ba, dt_cp, target_new_pos );
+	if( dbg_diver_flg ) msg += "\ttarget new pos = "+(target_new_pos.x).toFixed(3)+","+(target_new_pos.y).toFixed(3)+" rez="+rez+"\n";
+	if( rez != OK )return 99999;
+
+	var diver = dist( cp, target_new_pos );	// расст от снаряда до цели в момент пересеч.линии цели
+	if( dbg_diver_flg ) msg += "\tdiver = "+diver.toFixed(3)+"\n";
+
+	return diver;
+ }
+ 
+function go_to(r,pos){
+
+	var who = r.parentId ? CLONE : PARNT;  
+	if( dbg_goto_flg ) {
+		msg += "go_to: t="+tick+"\tw="+who+"\tstate=";
+		msg += "\tpos(x,y,ba)="+pos.x+","+pos.y+","+pos.ba;
+		msg += "\tcur(x,y,ba)="+cur_pos[who].x+","+cur_pos[who].y+","+cur_pos[who].ba;
+		msg += "\n";
+	}
+
+	// 1. направление на цель? 
+	var atp = angle_to_point( cur_pos[who], pos );
+	var	da = norm_180 ( atp - cur_pos[who].ba );
+	if( Math.abs(da) >= 1.0 && dist( cur_pos[who], pos ) >1 ) {		
+		if( dbg_goto_flg >=2 ) msg += "\tturn_xy: atp="+atp+"\tda="+da+"\n";
+		if( da >=  1.0 ) { r.turn( 1); return !OK; }
+		if( da <= -1.0 ) { r.turn(-1); return !OK; }
+	}
+	
+	// 2. пришли в нужную точку?
+	var dst = dist( cur_pos[who], pos ); 
+	if( dst >= 1 ) { 
+		if( dbg_goto_flg >= 2 ) msg += "\t\tmove dist="+dst+"\n";
+		r.ahead( 1 ); return !OK; 
+		} 
+	
+	// 3. корпус повернут как надо?
+	var dba = norm_180 ( pos.ba - cur_pos[who].ba );
+	if( pos.ba != -1  &&  Math.abs(dba) >= 1.0 ){
+		if( dbg_goto_flg >=2 ) msg += "\tturn_ba: goto="+pos.ba+"\tcur="+cur_pos[who].ba+" dba="+dba+"\n";
+		if( dba >=  1.0 ) { r.turn( 1); return !OK; }
+		if( dba <= -1.0 ) { r.turn(-1); return !OK; }
+		}
+
+	// 4. пушка повернута как надо?
+	// 
+	if( dbg_goto_flg ){	msg += "goto OK\n"; }
+	return OK;
+}
+
+var dbg_target_flg = 1;
+var trgt_sc = {};			// информация о посл скане цели: x,y,ba,caa
+var trgt_prev = {};		// info from prev scan
+var trgt_eval = {};		// оценка положения цели: v,ba,x,y,caa,dt;rza,rzb
+function dbg_ext_pos(p){ msg += "t,x,y,ba,caa="+p.t+","+p.x+","+p.y+","+p.ba+","+p.caa; }
+function dbg_target(){
+	msg += "dbg target: t="+tick+" sc:"; dbg_ext_pos(trgt_sc);
+	msg += "\tprev:"; dbg_ext_pos(trgt_prev); 
+	msg += "\teval:dt,dst,v,a="+trgt_eval.dt+","+(trgt_eval.dst).toFixed(2)+",";
+	msg += (trgt_eval.v).toFixed(2)+","+(trgt_eval.a).toFixed(2);
+	msg += "\n";
+}
+function copy_ext_pos(to,from){ to.x=from.x; to.y=from.y; to.ba=from.ba; to.caa=from.caa; to.t=from.t; }
+function set_ext_pos(pos,r) { // set extended pos info by bot(r)
+	pos.x = r.position.x; pos.y = r.position.y; pos.ba = r.angle; 
+	pos.caa = cnv_270_360 ( r.cannonAbsoluteAngle );
+	pos.t = tick; 
+}
+function eval_target_move(){	// calc target v,angle  by (trgt_sc,trgt_prev)
+	// предпол.что движ прямолинейно с момент последнего скана
+	trgt_eval.dt = trgt_sc.t - trgt_prev.t;	// прошло тиков с последнего скана
+	trgt_eval.dst = dist( trgt_sc, trgt_prev ); 	// расстояние от посл.скана 
+	trgt_eval.v = trgt_eval.dst / trgt_eval.dt;	// скорость движ (модуль)
+	trgt_eval.a = angle_to_point( trgt_prev, trgt_sc );	// угол движ (0-360)
+}
+function self_scan_target(r){	// set sc_* by parent
+	copy_ext_pos(trgt_prev,trgt_sc);	// save old scan to prev
+	set_ext_pos(trgt_sc,r);			// set trgt_sc by current bot info *** change for real target
+	eval_target_move();
+}
+function update_eval(){	// update eval:x,y, rza,rzb
+}
+function std_idle(r){
+	var who = r.parentId ? 1 : 0;     
+	if( who == 0) {++tick;}  // !! позже дописать вариант когда парент умер раньше клона
+	if( who == 0) {			//  в режиме "учебной цели" (парент)
+		self_scan_target(r);	// обновить sc_* по тек.сост. парента
+		update_eval();			// обновить ev_*, rz* по sc_*
+		if ( dbg_target_flg == 1 ) dbg_target();
+		}
+	if( tick == 1 ){ r.clone(); msg += "==== start ====\n"; }
+
+	cur_pos[ who ] = {"x":r.position.x, "y":r.position.y, "ba":r.angle, "caa":r.cannonAbsoluteAngle};
+
+	if( who==0 ) idle_parent( r ); else idle_clone( r );
+
+	if( (tick % 100)==0 && msg != "" ) { 
+		r.log(msg); 
+		msg=""; 
+	} 
+	
+	if( dbg_state_flg ) dbg_state(r);
+} 
+
+// -------- конец: стандартные заголовки
+
+function idle_parent(r){  // target
+
+	if( check_friend_dist(r) != OK ) return;
+
+	switch( state[PARNT] ){
+	case "p0": 
+		if( go_to(r,{"x":100, "y":50, "ba":180}) == OK ) state[PARNT] = "p1";
+		break;
+	case "p1": 
+		if( go_to(r,{"x":100, "y":450, "ba":0}) == OK ) { r.fire(); state[PARNT] = "p0"; }
+		break;
+	case "stop":
+		break;
+	default: msg += "***** error: parent unknown state: "+state[PARNT]+" *******\n";
+	}
+}
+
+function idle_clone(r){		// shooter
+
+	if( check_friend_dist(r) != OK ) return;
+	
+	if( shot_diver(cur_pos[CLONE], cur_pos[PARNT]) < MIN_SHOT_DIVER ) {
+		r.fire();
+		if( dbg_diver_flg >= 2 ) {
+			//dbg_pos();
+			diver_msg_track += "fire at "+tick+" ";
+			diver_msg_track += dbg_pos_msg+"\n";
+			}
+		}
+	
+	switch( state[CLONE] ){
+	case "s0": 
+		if( go_to(r,{"x":150, "y":50, "ba":90}) == OK ) state[CLONE] = "s1";
+		break;
+	case "s1": // 
+		//if( new_scan_flg[CLONE] ) { r.fire(); new_scan_flg[CLONE]=0; }
+		r.turn(1);
+		state[CLONE]="s1";
+		break;
+	case "s2": // 
+		r.ahead(1);
+		state[CLONE]="s1";
+		break;
+	case "stop": 
+		break;
+	default: msg += "***** error: clone unknown state: "+state[CLONE]+" *******\n";
+	}
+
+}
+
+Robot.prototype.onIdle = function(ev) {
+	var r = ev.robot;
+
+	// проверка отдельных функций^
+	// if( tick == 1 ){var cp = {}; msg = "start\n";	
+	// 		var rez = find_crosspoint({"x":200,"y":100,"ba":180},{"x":300,"y":100,"ba":0},cp); 
+	//		msg += "cp= "+cp.x+", "+cp.y+"\trez="+rez+"\n";
+	// } 
+	// else if( tick == 100 ){ r.log(msg); }
+	// else return;
+	
+	if( tick >  MAX_TICK ) return; 
+	std_idle(r);	
+}; 
+
+Robot.prototype.onScannedRobot = function(ev) {
+	var r = ev.robot;    
+	var sr = ev.scannedRobot;
+	var who = r.parentId ? CLONE : PARNT;
+	if( r.parentId != sr.id ) return; // в тестах клон стреляет по паренту
+	last_scan.x = sr.position.x; last_scan.y = sr.position.y; last_scan.ba = sr.angle;
+	last_scan.t = tick;
+	new_scan_flg[who] = 1;
+}    
+ 
